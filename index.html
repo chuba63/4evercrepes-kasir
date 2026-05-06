@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#f43f5e">
+<title>4ever Crepes — Kasir PO</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { -webkit-tap-highlight-color: transparent; font-family: system-ui, -apple-system, sans-serif; }
+  input, textarea, select { font-size: 16px; }
+  .tab-btn.active { color: #e11d48; border-bottom: 2px solid #f43f5e; background: #fff1f2; }
+  .tab-btn { color: #6b7280; border-bottom: 2px solid transparent; }
+</style>
+</head>
+<body class="bg-rose-50 text-gray-800 min-h-screen pb-12">
+
+<header class="bg-gradient-to-r from-rose-500 to-pink-500 text-white px-4 py-3 sticky top-0 z-10 shadow">
+  <div class="flex items-center justify-between max-w-md mx-auto">
+    <div>
+      <h1 class="font-bold text-lg" id="business-name">4ever Crepes</h1>
+      <p class="text-xs opacity-90">Kasir PO</p>
+    </div>
+    <button onclick="showSettings()" class="p-2 hover:bg-white/10 rounded text-xl">⚙️</button>
+  </div>
+</header>
+
+<nav class="bg-white border-b border-gray-200 sticky top-[60px] z-10">
+  <div class="flex max-w-md mx-auto">
+    <button data-tab="po" class="tab-btn flex-1 py-3 text-sm font-medium">📋 PO Aktif</button>
+    <button data-tab="menu" class="tab-btn flex-1 py-3 text-sm font-medium">🍴 Menu</button>
+    <button data-tab="history" class="tab-btn flex-1 py-3 text-sm font-medium">📁 Riwayat</button>
+  </div>
+</nav>
+
+<main id="content" class="px-4 py-4 max-w-md mx-auto"></main>
+
+<div id="modal" class="hidden fixed inset-0 bg-black/50 z-20 flex items-end sm:items-center justify-center sm:p-4">
+  <div class="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<script>
+// ============== STATE ==============
+const STORAGE_KEY = '4ever-crepes-state-v1';
+const defaultState = {
+  business: {
+    name: '4ever Crepes',
+    payment: 'BCA 1234567890\na/n [Nama Pemilik]',
+    template: 'default'
+  },
+  menu: [],
+  pos: []
+};
+
+let state = loadState();
+let activeTab = 'po';
+let orderDraft = null;
+let editingOrderId = null;
+let pendingIGMessage = '';
+
+function loadState() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) return Object.assign({}, defaultState, JSON.parse(stored));
+  } catch (e) {}
+  return JSON.parse(JSON.stringify(defaultState));
+}
+
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+// ============== HELPERS ==============
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function escapeHtml(s) {
+  return String(s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function formatRp(n) { return 'Rp ' + (Math.round(n) || 0).toLocaleString('id-ID'); }
+function formatDate(iso) {
+  return new Date(iso).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
+}
+function normalizePhone(p) {
+  let s = String(p || '').replace(/\D/g, '');
+  if (s.startsWith('0')) s = '62' + s.slice(1);
+  else if (s.startsWith('8')) s = '62' + s;
+  else if (s.startsWith('620')) s = '62' + s.slice(3);
+  return s;
+}
+function normalizeIG(s) {
+  return String(s || '').trim().replace(/^@+/, '').replace(/[^a-zA-Z0-9._]/g, '').toLowerCase();
+}
+function copyToClipboard(text) {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).catch(() => fallbackCopy(text));
+  } else {
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta);
+}
+
+function getActivePo() { return state.pos.find(p => p.status === 'active'); }
+function findOrder(id) {
+  for (const po of state.pos) {
+    const o = (po.orders || []).find(o => o.id === id);
+    if (o) return { po, order: o };
+  }
+  return null;
+}
+function calcOrderSub(order) {
+  return (order.items || []).reduce((s, it) => {
+    const m = state.menu.find(m => m.id === it.menuId);
+    return s + (m?.price || 0) * (it.qty || 0);
+  }, 0);
+}
+function calcOrderTotal(order) {
+  return calcOrderSub(order) + (order.shipping || 0) - (order.discount || 0);
+}
+
+// ============== TABS ==============
+function setTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll('.tab-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  render();
+}
+document.querySelectorAll('.tab-btn').forEach(b => {
+  b.addEventListener('click', () => setTab(b.dataset.tab));
+});
+
+// ============== RENDER ==============
+function render() {
+  document.getElementById('business-name').textContent = state.business.name;
+  const c = document.getElementById('content');
+  if (activeTab === 'po') c.innerHTML = renderPoTab();
+  else if (activeTab === 'menu') c.innerHTML = renderMenuTab();
+  else c.innerHTML = renderHistoryTab();
+}
+
+function renderPoTab() {
+  const po = getActivePo();
+  if (!po) {
+    return `
+      <div class="text-center py-12">
+        <div class="text-6xl mb-3">🥞</div>
+        <p class="text-gray-500 mb-4">Belum ada PO aktif</p>
+        <button onclick="newPo()" class="bg-rose-500 hover:bg-rose-600 text-white px-6 py-3 rounded-full font-semibold shadow">+ Buat PO Baru</button>
+      </div>
+    `;
+  }
+  const orders = po.orders || [];
+  const total = orders.reduce((s, o) => s + calcOrderTotal(o), 0);
+  const paidTotal = orders.filter(o => o.paid).reduce((s, o) => s + calcOrderTotal(o), 0);
+  const unpaid = orders.filter(o => !o.paid).length;
+
+  return `
+    <div class="bg-white rounded-2xl p-4 shadow mb-4">
+      <div class="flex justify-between items-start mb-3">
+        <div>
+          <h2 class="font-bold text-lg">${escapeHtml(po.name)}</h2>
+          <p class="text-xs text-gray-500">${formatDate(po.date)}</p>
+        </div>
+        <div class="flex gap-1">
+          <button onclick="editPo('${po.id}')" class="text-xs bg-gray-100 px-3 py-1 rounded-full">✏️</button>
+          <button onclick="closePo('${po.id}')" class="text-xs bg-rose-100 text-rose-600 px-3 py-1 rounded-full">Tutup PO</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-3 gap-2">
+        <div class="bg-rose-50 rounded-lg p-2 text-center">
+          <p class="text-[10px] text-gray-500 uppercase">Order</p>
+          <p class="font-bold text-rose-600">${orders.length}</p>
+        </div>
+        <div class="bg-rose-50 rounded-lg p-2 text-center">
+          <p class="text-[10px] text-gray-500 uppercase">Total</p>
+          <p class="font-bold text-rose-600 text-sm">${formatRp(total)}</p>
+        </div>
+        <div class="bg-green-50 rounded-lg p-2 text-center">
+          <p class="text-[10px] text-gray-500 uppercase">Lunas</p>
+          <p class="font-bold text-green-600 text-sm">${formatRp(paidTotal)}</p>
+        </div>
+      </div>
+      ${unpaid > 0 ? `<p class="text-xs text-yellow-700 mt-2 text-center">⚠️ ${unpaid} pesanan belum bayar</p>` : ''}
+    </div>
+
+    <button onclick="newOrder()" class="w-full bg-rose-500 hover:bg-rose-600 text-white py-3 rounded-xl font-semibold mb-4 shadow">+ Tambah Pesanan</button>
+
+    ${orders.length === 0 ? '<p class="text-center text-gray-400 py-6 text-sm">Belum ada pesanan</p>' :
+      `<div class="space-y-2">${orders.map(renderOrderCard).join('')}</div>`}
+  `;
+}
+
+function renderOrderCard(order) {
+  const sub = calcOrderSub(order);
+  const total = calcOrderTotal(order);
+  const itemsList = (order.items || []).map(it => {
+    const m = state.menu.find(m => m.id === it.menuId);
+    return `<li>${it.qty}× ${escapeHtml(m?.name || '[menu dihapus]')}</li>`;
+  }).join('');
+
+  const hasWA = !!(order.customerWA || '').trim();
+  const hasIG = !!(order.customerIG || '').trim();
+  const sendBtns = [];
+  if (hasWA) sendBtns.push(`<button onclick="sendWA('${order.id}')" class="bg-green-500 hover:bg-green-600 text-white py-2 rounded-lg text-sm font-semibold">📱 Kirim WA</button>`);
+  if (hasIG) sendBtns.push(`<button onclick="sendIG('${order.id}')" class="bg-pink-500 hover:bg-pink-600 text-white py-2 rounded-lg text-sm font-semibold">📷 Kirim IG</button>`);
+  const sendRow = sendBtns.length === 0
+    ? '<p class="text-xs text-yellow-600 italic mt-3">⚠️ Belum ada kontak</p>'
+    : `<div class="grid ${sendBtns.length === 2 ? 'grid-cols-2' : 'grid-cols-1'} gap-2 mt-3">${sendBtns.join('')}</div>`;
+
+  return `
+    <div class="bg-white rounded-xl p-4 shadow">
+      <div class="flex justify-between items-start mb-2">
+        <div class="min-w-0 flex-1">
+          <h3 class="font-semibold truncate">${escapeHtml(order.customerName)}</h3>
+          <div class="text-xs text-gray-500 space-y-0.5">
+            ${hasWA ? `<div>📱 ${escapeHtml(order.customerWA)}</div>` : ''}
+            ${hasIG ? `<div>📷 @${escapeHtml(normalizeIG(order.customerIG))}</div>` : ''}
+            ${(!hasWA && !hasIG) ? `<div class="italic text-yellow-600">(no kontak)</div>` : ''}
+          </div>
+        </div>
+        <span class="text-[10px] ${order.paid ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'} px-2 py-1 rounded-full font-semibold whitespace-nowrap ml-2">
+          ${order.paid ? '✓ LUNAS' : 'BELUM BAYAR'}
+        </span>
+      </div>
+      <ul class="text-xs text-gray-600 ml-4 list-disc mb-2 mt-2">${itemsList}</ul>
+      <div class="text-xs text-gray-500 space-y-0.5 mb-2">
+        <div class="flex justify-between"><span>Subtotal</span><span>${formatRp(sub)}</span></div>
+        ${order.shipping > 0 ? `<div class="flex justify-between"><span>Ongkir</span><span>${formatRp(order.shipping)}</span></div>` : ''}
+        ${order.discount > 0 ? `<div class="flex justify-between text-green-600"><span>Diskon</span><span>-${formatRp(order.discount)}</span></div>` : ''}
+        <div class="flex justify-between font-bold text-rose-600 text-sm pt-1 border-t"><span>Total</span><span>${formatRp(total)}</span></div>
+      </div>
+      ${order.notes ? `<p class="text-xs italic text-gray-500 mb-2">📝 ${escapeHtml(order.notes)}</p>` : ''}
+      ${sendRow}
+      <div class="grid grid-cols-3 gap-2 mt-2">
+        <button onclick="togglePaid('${order.id}')" class="bg-gray-100 py-2 rounded-lg text-xs">${order.paid ? '↩️ Batal Lunas' : '✓ Tandai Lunas'}</button>
+        <button onclick="editOrder('${order.id}')" class="bg-gray-100 py-2 rounded-lg text-xs">✏️ Edit</button>
+        <button onclick="deleteOrder('${order.id}')" class="bg-red-50 text-red-600 py-2 rounded-lg text-xs">🗑️ Hapus</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderMenuTab() {
+  return `
+    <button onclick="newMenu()" class="w-full bg-rose-500 hover:bg-rose-600 text-white py-3 rounded-xl font-semibold mb-4 shadow">+ Tambah Menu</button>
+    ${state.menu.length === 0 ? `
+      <div class="text-center py-8">
+        <div class="text-5xl mb-2">🍴</div>
+        <p class="text-gray-500 text-sm">Belum ada menu. Tambah menu dulu yuk!</p>
+      </div>
+    ` : `
+      <div class="space-y-2">
+        ${state.menu.map(m => `
+          <div class="bg-white rounded-xl p-4 shadow flex justify-between items-center">
+            <div class="min-w-0 flex-1">
+              <h3 class="font-semibold truncate">${escapeHtml(m.name)}</h3>
+              <p class="text-rose-600 font-bold text-sm">${formatRp(m.price)}</p>
+            </div>
+            <div class="flex gap-2 ml-2">
+              <button onclick="editMenu('${m.id}')" class="bg-gray-100 px-3 py-2 rounded-lg">✏️</button>
+              <button onclick="deleteMenu('${m.id}')" class="bg-red-50 text-red-600 px-3 py-2 rounded-lg">🗑️</button>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    `}
+  `;
+}
+
+function renderHistoryTab() {
+  const closed = state.pos.filter(p => p.status === 'closed').sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (closed.length === 0) {
+    return `
+      <div class="text-center py-8">
+        <div class="text-5xl mb-2">📁</div>
+        <p class="text-gray-500 text-sm">Belum ada PO yang ditutup</p>
+      </div>
+    `;
+  }
+  const grandTotal = closed.reduce((s, p) => s + (p.orders || []).reduce((ss, o) => ss + calcOrderTotal(o), 0), 0);
+  return `
+    <div class="bg-rose-100 rounded-xl p-3 mb-4 text-center">
+      <p class="text-xs text-gray-600">Total dari ${closed.length} PO selesai</p>
+      <p class="font-bold text-rose-700 text-lg">${formatRp(grandTotal)}</p>
+    </div>
+    <div class="space-y-2">
+      ${closed.map(p => {
+        const orders = p.orders || [];
+        const total = orders.reduce((s, o) => s + calcOrderTotal(o), 0);
+        return `
+          <button onclick="viewPo('${p.id}')" class="w-full bg-white rounded-xl p-4 shadow text-left">
+            <div class="flex justify-between items-start">
+              <div>
+                <h3 class="font-semibold">${escapeHtml(p.name)}</h3>
+                <p class="text-xs text-gray-500">${formatDate(p.date)}</p>
+              </div>
+              <div class="text-right">
+                <p class="text-xs text-gray-500">${orders.length} order</p>
+                <p class="font-bold text-rose-600">${formatRp(total)}</p>
+              </div>
+            </div>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+// ============== MODAL ==============
+function showModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal').classList.remove('hidden');
+}
+function closeModal() {
+  document.getElementById('modal').classList.add('hidden');
+  document.getElementById('modal-content').innerHTML = '';
+}
+document.getElementById('modal').addEventListener('click', (e) => {
+  if (e.target.id === 'modal') closeModal();
+});
+
+// ============== PO CRUD ==============
+function newPo() {
+  if (getActivePo()) {
+    alert('Sudah ada PO aktif. Tutup dulu sebelum buat baru.');
+    return;
+  }
+  const today = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long' });
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-4">Buat PO Baru</h2>
+      <label class="block text-sm font-medium mb-1">Nama PO</label>
+      <input id="po-name" class="w-full border rounded-lg px-3 py-2 mb-4" value="PO ${today}" placeholder="PO 6 Mei">
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Batal</button>
+        <button onclick="savePo()" class="flex-1 bg-rose-500 text-white py-3 rounded-xl font-semibold">Simpan</button>
+      </div>
+    </div>
+  `);
+  setTimeout(() => document.getElementById('po-name')?.focus(), 100);
+}
+
+function savePo() {
+  const name = document.getElementById('po-name').value.trim();
+  if (!name) { alert('Nama PO wajib'); return; }
+  state.pos.unshift({
+    id: uid(), name, date: new Date().toISOString(), status: 'active', orders: []
+  });
+  saveState(); closeModal(); render();
+}
+
+function editPo(id) {
+  const po = state.pos.find(p => p.id === id);
+  if (!po) return;
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-4">Edit PO</h2>
+      <label class="block text-sm font-medium mb-1">Nama PO</label>
+      <input id="po-name-edit" class="w-full border rounded-lg px-3 py-2 mb-4" value="${escapeHtml(po.name)}">
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Batal</button>
+        <button onclick="savePoEdit('${id}')" class="flex-1 bg-rose-500 text-white py-3 rounded-xl font-semibold">Simpan</button>
+      </div>
+    </div>
+  `);
+}
+
+function savePoEdit(id) {
+  const name = document.getElementById('po-name-edit').value.trim();
+  if (!name) { alert('Nama PO wajib'); return; }
+  const po = state.pos.find(p => p.id === id);
+  if (po) { po.name = name; saveState(); closeModal(); render(); }
+}
+
+function closePo(id) {
+  const po = state.pos.find(p => p.id === id);
+  if (!po) return;
+  const unpaid = (po.orders || []).filter(o => !o.paid).length;
+  let msg = 'Tutup PO ini? Akan dipindah ke Riwayat.';
+  if (unpaid > 0) msg = `Masih ada ${unpaid} pesanan belum bayar. Yakin tutup PO?`;
+  if (!confirm(msg)) return;
+  po.status = 'closed';
+  saveState(); render();
+}
+
+function viewPo(id) {
+  const po = state.pos.find(p => p.id === id);
+  if (!po) return;
+  const orders = po.orders || [];
+  const total = orders.reduce((s, o) => s + calcOrderTotal(o), 0);
+  const paid = orders.filter(o => o.paid).length;
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg">${escapeHtml(po.name)}</h2>
+      <p class="text-xs text-gray-500 mb-3">${formatDate(po.date)}</p>
+      <div class="bg-rose-50 rounded-lg p-3 mb-3 text-sm">
+        <div class="flex justify-between"><span>Total order</span><strong>${orders.length}</strong></div>
+        <div class="flex justify-between"><span>Lunas / Belum</span><strong>${paid} / ${orders.length - paid}</strong></div>
+        <div class="flex justify-between text-rose-600 font-bold pt-1 border-t mt-1"><span>Total Pendapatan</span><span>${formatRp(total)}</span></div>
+      </div>
+      <div class="space-y-2 mb-4 max-h-72 overflow-y-auto">
+        ${orders.map(o => {
+          const items = (o.items || []).map(it => {
+            const m = state.menu.find(m => m.id === it.menuId);
+            return `${it.qty}× ${escapeHtml(m?.name || '?')}`;
+          }).join(', ');
+          const contact = [
+            o.customerWA ? `📱 ${escapeHtml(o.customerWA)}` : '',
+            o.customerIG ? `📷 @${escapeHtml(normalizeIG(o.customerIG))}` : ''
+          ].filter(Boolean).join(' · ');
+          return `
+            <div class="border rounded-lg p-2">
+              <div class="flex justify-between items-start">
+                <span class="font-semibold text-sm">${escapeHtml(o.customerName)}</span>
+                <span class="text-[10px] ${o.paid ? 'text-green-600' : 'text-yellow-600'} font-semibold">${o.paid ? '✓ LUNAS' : 'BELUM'}</span>
+              </div>
+              ${contact ? `<p class="text-[10px] text-gray-400">${contact}</p>` : ''}
+              <p class="text-xs text-gray-500">${items}</p>
+              <p class="text-sm font-bold text-rose-600">${formatRp(calcOrderTotal(o))}</p>
+            </div>
+          `;
+        }).join('') || '<p class="text-sm text-gray-500 italic">Tidak ada pesanan</p>'}
+      </div>
+      <div class="flex gap-2">
+        <button onclick="reopenPo('${id}')" class="flex-1 bg-blue-100 text-blue-700 py-2 rounded-lg text-sm font-semibold">Buka Lagi</button>
+        <button onclick="deletePo('${id}')" class="flex-1 bg-red-100 text-red-600 py-2 rounded-lg text-sm font-semibold">Hapus</button>
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-2 rounded-lg">Tutup</button>
+      </div>
+    </div>
+  `);
+}
+
+function reopenPo(id) {
+  if (getActivePo()) {
+    alert('Tutup PO yang aktif dulu sebelum buka PO ini.');
+    return;
+  }
+  const po = state.pos.find(p => p.id === id);
+  if (po) {
+    po.status = 'active';
+    saveState(); closeModal(); setTab('po');
+  }
+}
+
+function deletePo(id) {
+  if (!confirm('Hapus PO ini permanen? Tidak bisa di-undo.')) return;
+  state.pos = state.pos.filter(p => p.id !== id);
+  saveState(); closeModal(); render();
+}
+
+// ============== MENU CRUD ==============
+function newMenu() {
+  showModal(menuFormHtml());
+  setTimeout(() => document.getElementById('m-name')?.focus(), 100);
+}
+function editMenu(id) {
+  const m = state.menu.find(x => x.id === id);
+  if (m) showModal(menuFormHtml(m));
+}
+function menuFormHtml(m) {
+  const editing = !!m;
+  return `
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-4">${editing ? 'Edit' : 'Tambah'} Menu</h2>
+      <label class="block text-sm font-medium mb-1">Nama Menu</label>
+      <input id="m-name" class="w-full border rounded-lg px-3 py-2 mb-3" value="${escapeHtml(m?.name || '')}" placeholder="Crepes Coklat Keju">
+      <label class="block text-sm font-medium mb-1">Harga (Rp)</label>
+      <input id="m-price" type="number" inputmode="numeric" min="0" class="w-full border rounded-lg px-3 py-2 mb-4" value="${m?.price || ''}" placeholder="15000">
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Batal</button>
+        <button onclick="saveMenu('${m?.id || ''}')" class="flex-1 bg-rose-500 text-white py-3 rounded-xl font-semibold">Simpan</button>
+      </div>
+    </div>
+  `;
+}
+function saveMenu(id) {
+  const name = document.getElementById('m-name').value.trim();
+  const price = parseInt(document.getElementById('m-price').value) || 0;
+  if (!name) { alert('Nama menu wajib'); return; }
+  if (price <= 0) { alert('Harga harus > 0'); return; }
+  if (id) {
+    const m = state.menu.find(x => x.id === id);
+    if (m) { m.name = name; m.price = price; }
+  } else {
+    state.menu.push({ id: uid(), name, price });
+  }
+  saveState(); closeModal(); render();
+}
+function deleteMenu(id) {
+  if (!confirm('Hapus menu ini? Pesanan lama yang pakai menu ini akan menampilkan "[menu dihapus]".')) return;
+  state.menu = state.menu.filter(m => m.id !== id);
+  saveState(); render();
+}
+
+// ============== ORDER CRUD ==============
+function newOrder() {
+  if (state.menu.length === 0) {
+    alert('Tambah menu dulu di tab Menu ya!');
+    setTab('menu');
+    return;
+  }
+  if (!getActivePo()) { alert('Buat PO dulu'); return; }
+  editingOrderId = null;
+  orderDraft = {
+    id: uid(),
+    customerName: '',
+    customerWA: '',
+    customerIG: '',
+    items: [{ menuId: state.menu[0].id, qty: 1 }],
+    shipping: 0,
+    discount: 0,
+    paid: false,
+    notes: ''
+  };
+  showOrderModal();
+}
+
+function editOrder(id) {
+  const f = findOrder(id);
+  if (!f) return;
+  editingOrderId = id;
+  orderDraft = JSON.parse(JSON.stringify(f.order));
+  showOrderModal();
+}
+
+function showOrderModal() {
+  const isEdit = !!editingOrderId;
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-4">${isEdit ? 'Edit Pesanan' : 'Pesanan Baru'}</h2>
+
+      <label class="block text-sm font-medium mb-1">Nama Customer *</label>
+      <input id="o-name" class="w-full border rounded-lg px-3 py-2 mb-3" value="${escapeHtml(orderDraft.customerName)}" oninput="orderDraft.customerName=this.value" placeholder="Sarah">
+
+      <label class="block text-sm font-medium mb-1">Kontak <span class="text-xs text-gray-500 font-normal">(isi WA, IG, atau dua-duanya)</span></label>
+      <div class="flex items-center gap-2 mb-2">
+        <span class="text-xs text-gray-500 w-12 shrink-0 text-center">📱 WA</span>
+        <input id="o-wa" type="tel" inputmode="numeric" class="flex-1 min-w-0 border rounded-lg px-3 py-2" value="${escapeHtml(orderDraft.customerWA)}" oninput="orderDraft.customerWA=this.value" placeholder="081234567890">
+      </div>
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs text-gray-500 w-12 shrink-0 text-center">📷 IG</span>
+        <input id="o-ig" class="flex-1 min-w-0 border rounded-lg px-3 py-2" value="${escapeHtml(orderDraft.customerIG || '')}" oninput="orderDraft.customerIG=this.value" placeholder="@username">
+      </div>
+
+      <label class="block text-sm font-medium mb-1">Pesanan *</label>
+      <div id="items-list" class="space-y-2 mb-2"></div>
+      <button onclick="addDraftItem()" class="w-full border-2 border-dashed border-rose-300 text-rose-500 py-2 rounded-lg mb-3 text-sm font-medium">+ Tambah Item</button>
+
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <div>
+          <label class="block text-sm font-medium mb-1">Ongkir</label>
+          <input type="number" inputmode="numeric" min="0" class="w-full border rounded-lg px-3 py-2" value="${orderDraft.shipping || ''}" oninput="orderDraft.shipping=parseInt(this.value)||0; updateDraftTotal()" placeholder="0">
+        </div>
+        <div>
+          <label class="block text-sm font-medium mb-1">Diskon</label>
+          <input type="number" inputmode="numeric" min="0" class="w-full border rounded-lg px-3 py-2" value="${orderDraft.discount || ''}" oninput="orderDraft.discount=parseInt(this.value)||0; updateDraftTotal()" placeholder="0">
+        </div>
+      </div>
+
+      <label class="block text-sm font-medium mb-1">Catatan (opsional)</label>
+      <textarea id="o-notes" rows="2" class="w-full border rounded-lg px-3 py-2 mb-3" oninput="orderDraft.notes=this.value" placeholder="contoh: extra topping, tanpa keju, dll">${escapeHtml(orderDraft.notes || '')}</textarea>
+
+      <label class="flex items-center gap-2 mb-3 text-sm">
+        <input type="checkbox" id="o-paid" ${orderDraft.paid ? 'checked' : ''} onchange="orderDraft.paid=this.checked" class="w-4 h-4">
+        <span>Sudah lunas</span>
+      </label>
+
+      <div class="bg-rose-50 rounded-lg p-3 mb-4 text-sm">
+        <div class="flex justify-between"><span>Subtotal</span><span id="d-sub">${formatRp(0)}</span></div>
+        <div class="flex justify-between"><span>Ongkir</span><span id="d-ship">${formatRp(0)}</span></div>
+        <div class="flex justify-between text-green-600"><span>Diskon</span><span id="d-disc">-${formatRp(0)}</span></div>
+        <div class="flex justify-between font-bold text-rose-600 text-base pt-1 border-t mt-1"><span>Total</span><span id="d-total">${formatRp(0)}</span></div>
+      </div>
+
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Batal</button>
+        <button onclick="saveOrder()" class="flex-1 bg-rose-500 text-white py-3 rounded-xl font-semibold">Simpan</button>
+      </div>
+    </div>
+  `);
+  renderDraftItems();
+  updateDraftTotal();
+}
+
+function renderDraftItems() {
+  const el = document.getElementById('items-list');
+  if (!el) return;
+  if (orderDraft.items.length === 0) {
+    el.innerHTML = '<p class="text-xs text-gray-400 italic text-center py-2">Belum ada item</p>';
+    return;
+  }
+  el.innerHTML = orderDraft.items.map((it, idx) => {
+    const options = state.menu.map(m =>
+      `<option value="${m.id}" ${it.menuId === m.id ? 'selected' : ''}>${escapeHtml(m.name)} — ${formatRp(m.price)}</option>`
+    ).join('');
+    return `
+      <div class="flex gap-2 items-center bg-rose-50 rounded-lg p-2">
+        <select onchange="orderDraft.items[${idx}].menuId=this.value; updateDraftTotal()" class="flex-1 border rounded px-2 py-1 bg-white text-sm">${options}</select>
+        <input type="number" inputmode="numeric" min="1" value="${it.qty}" oninput="orderDraft.items[${idx}].qty=Math.max(1, parseInt(this.value)||1); updateDraftTotal()" class="w-14 border rounded px-2 py-1 text-center bg-white">
+        <button onclick="removeDraftItem(${idx})" class="text-red-500 px-2 text-lg" title="Hapus item">✕</button>
+      </div>
+    `;
+  }).join('');
+}
+
+function addDraftItem() {
+  if (state.menu.length === 0) return;
+  orderDraft.items.push({ menuId: state.menu[0].id, qty: 1 });
+  renderDraftItems();
+  updateDraftTotal();
+}
+
+function removeDraftItem(idx) {
+  orderDraft.items.splice(idx, 1);
+  renderDraftItems();
+  updateDraftTotal();
+}
+
+function updateDraftTotal() {
+  const sub = calcOrderSub(orderDraft);
+  const ship = orderDraft.shipping || 0;
+  const disc = orderDraft.discount || 0;
+  const total = sub + ship - disc;
+  const $ = id => document.getElementById(id);
+  if ($('d-sub')) $('d-sub').textContent = formatRp(sub);
+  if ($('d-ship')) $('d-ship').textContent = formatRp(ship);
+  if ($('d-disc')) $('d-disc').textContent = '-' + formatRp(disc);
+  if ($('d-total')) $('d-total').textContent = formatRp(total);
+}
+
+function saveOrder() {
+  if (!orderDraft.customerName.trim()) { alert('Nama customer wajib'); return; }
+  if (!(orderDraft.customerWA || '').trim() && !(orderDraft.customerIG || '').trim()) {
+    alert('Isi minimal salah satu kontak (WA atau IG)'); return;
+  }
+  if (orderDraft.items.length === 0) { alert('Minimal 1 item'); return; }
+  const po = getActivePo();
+  if (!po) { alert('Tidak ada PO aktif'); return; }
+  if (editingOrderId) {
+    const idx = po.orders.findIndex(o => o.id === editingOrderId);
+    if (idx >= 0) po.orders[idx] = orderDraft;
+  } else {
+    po.orders.push(orderDraft);
+  }
+  saveState(); closeModal(); render();
+}
+
+function deleteOrder(id) {
+  if (!confirm('Hapus pesanan ini?')) return;
+  for (const p of state.pos) {
+    if (p.orders) p.orders = p.orders.filter(o => o.id !== id);
+  }
+  saveState(); render();
+}
+
+function togglePaid(id) {
+  const f = findOrder(id);
+  if (f) { f.order.paid = !f.order.paid; saveState(); render(); }
+}
+
+// ============== WHATSAPP ==============
+function generateWAMessage(order, po) {
+  const lines = [];
+  lines.push(`Halo Kak ${order.customerName}! 🥞`);
+  lines.push('');
+  lines.push(`Berikut detail pesanan ${po.name} di *${state.business.name}*:`);
+  lines.push('');
+  let sub = 0;
+  (order.items || []).forEach(it => {
+    const m = state.menu.find(m => m.id === it.menuId);
+    if (!m) return;
+    const itemSub = m.price * it.qty;
+    sub += itemSub;
+    lines.push(`• ${it.qty}× ${m.name} — ${formatRp(itemSub)}`);
+  });
+  lines.push('');
+  lines.push(`Subtotal: ${formatRp(sub)}`);
+  if (order.shipping > 0) lines.push(`Ongkir: ${formatRp(order.shipping)}`);
+  if (order.discount > 0) lines.push(`Diskon: -${formatRp(order.discount)}`);
+  lines.push(`*Total: ${formatRp(sub + (order.shipping || 0) - (order.discount || 0))}*`);
+  if (order.notes) {
+    lines.push('');
+    lines.push(`Catatan: ${order.notes}`);
+  }
+  lines.push('');
+  if (state.business.payment) {
+    lines.push('💳 *Pembayaran:*');
+    lines.push(state.business.payment);
+    lines.push('');
+  }
+  lines.push('Mohon konfirmasi pembayaran ya kak 🙏');
+  lines.push(`Terima kasih sudah order di ${state.business.name}! ✨`);
+  return lines.join('\n');
+}
+
+function sendWA(orderId) {
+  const f = findOrder(orderId);
+  if (!f) return;
+  const phone = normalizePhone(f.order.customerWA);
+  if (!phone || phone.length < 10) {
+    if (!confirm('Nomor WA kosong/tidak valid. Buka WhatsApp tanpa nomor (copy-paste manual)?')) return;
+    const msg = encodeURIComponent(generateWAMessage(f.order, f.po));
+    window.open(`https://wa.me/?text=${msg}`, '_blank');
+    return;
+  }
+  const msg = encodeURIComponent(generateWAMessage(f.order, f.po));
+  window.open(`https://wa.me/${phone}?text=${msg}`, '_blank');
+}
+
+function sendIG(orderId) {
+  const f = findOrder(orderId);
+  if (!f) return;
+  const username = normalizeIG(f.order.customerIG);
+  if (!username) { alert('Username IG belum diisi/tidak valid'); return; }
+  pendingIGMessage = generateWAMessage(f.order, f.po);
+  copyToClipboard(pendingIGMessage);
+  const igUrl = `https://ig.me/m/${encodeURIComponent(username)}`;
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-3">📷 Kirim DM Instagram</h2>
+      <div class="bg-green-50 border border-green-200 rounded-lg p-3 mb-3">
+        <p class="text-sm text-green-700 font-semibold">✓ Pesan udah di-copy ke clipboard</p>
+        <p class="text-xs text-green-600 mt-1">ke: <strong>@${escapeHtml(username)}</strong></p>
+      </div>
+      <p class="text-sm text-gray-700 mb-2 font-semibold">Cara kirim:</p>
+      <ol class="text-sm list-decimal ml-5 mb-4 space-y-1 text-gray-700">
+        <li>Klik <strong>"Buka Chat IG"</strong> di bawah</li>
+        <li>Di chat IG, <strong>long-press</strong> kolom pesan → <strong>Paste</strong></li>
+        <li>Tekan tombol kirim 🚀</li>
+      </ol>
+      <details class="mb-4 bg-gray-50 rounded-lg">
+        <summary class="text-xs text-gray-600 cursor-pointer p-2">Lihat preview pesan</summary>
+        <div class="p-2 pt-0">
+          <textarea readonly class="w-full text-xs border rounded p-2 h-32 bg-white">${escapeHtml(pendingIGMessage)}</textarea>
+          <button id="recopy-btn" onclick="recopyIG()" class="text-xs text-blue-600 mt-1">📋 Copy ulang</button>
+        </div>
+      </details>
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Tutup</button>
+        <a href="${igUrl}" target="_blank" rel="noopener" onclick="setTimeout(closeModal, 200)" class="flex-1 bg-pink-500 hover:bg-pink-600 text-white py-3 rounded-xl font-semibold text-center">Buka Chat IG →</a>
+      </div>
+    </div>
+  `);
+}
+
+function recopyIG() {
+  copyToClipboard(pendingIGMessage);
+  const btn = document.getElementById('recopy-btn');
+  if (btn) {
+    const orig = btn.textContent;
+    btn.textContent = '✓ Tercopy!';
+    btn.classList.add('text-green-600');
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.remove('text-green-600');
+    }, 1500);
+  }
+}
+
+// ============== SETTINGS ==============
+function showSettings() {
+  showModal(`
+    <div class="p-4">
+      <h2 class="font-bold text-lg mb-4">Pengaturan</h2>
+
+      <label class="block text-sm font-medium mb-1">Nama Bisnis</label>
+      <input id="s-name" class="w-full border rounded-lg px-3 py-2 mb-3" value="${escapeHtml(state.business.name)}">
+
+      <label class="block text-sm font-medium mb-1">Info Pembayaran</label>
+      <textarea id="s-payment" rows="4" class="w-full border rounded-lg px-3 py-2 mb-4" placeholder="BCA 1234567890&#10;a/n Nama Pemilik">${escapeHtml(state.business.payment)}</textarea>
+
+      <p class="text-xs text-gray-500 mb-1">Backup data berkala biar aman ya!</p>
+      <button onclick="exportData()" class="w-full bg-blue-100 text-blue-700 py-2 rounded-lg mb-2 text-sm font-semibold">⬇️ Download Backup (JSON)</button>
+      <input type="file" id="s-import" accept=".json" onchange="importData(event)" class="hidden">
+      <button onclick="document.getElementById('s-import').click()" class="w-full bg-blue-100 text-blue-700 py-2 rounded-lg mb-3 text-sm font-semibold">⬆️ Restore dari Backup</button>
+
+      <button onclick="resetAll()" class="w-full bg-red-50 text-red-600 py-2 rounded-lg mb-4 text-xs">Hapus Semua Data</button>
+
+      <div class="flex gap-2">
+        <button onclick="closeModal()" class="flex-1 bg-gray-100 py-3 rounded-xl">Batal</button>
+        <button onclick="saveSettings()" class="flex-1 bg-rose-500 text-white py-3 rounded-xl font-semibold">Simpan</button>
+      </div>
+    </div>
+  `);
+}
+
+function saveSettings() {
+  state.business.name = document.getElementById('s-name').value.trim() || '4ever Crepes';
+  state.business.payment = document.getElementById('s-payment').value;
+  saveState(); closeModal(); render();
+}
+
+function exportData() {
+  const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `4ever-crepes-backup-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importData(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const imported = JSON.parse(ev.target.result);
+      if (!imported.menu || !imported.pos) throw new Error('Format file tidak valid');
+      if (!confirm('Yakin restore? Data yang ada sekarang akan diganti.')) return;
+      state = Object.assign({}, defaultState, imported);
+      saveState(); closeModal(); render();
+      alert('Restore berhasil!');
+    } catch (err) {
+      alert('Gagal restore: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function resetAll() {
+  if (!confirm('HAPUS SEMUA DATA (menu, PO, pesanan)? Tidak bisa di-undo!')) return;
+  if (!confirm('Yakin banget? Backup dulu kalo perlu.')) return;
+  state = JSON.parse(JSON.stringify(defaultState));
+  saveState(); closeModal(); render();
+}
+
+// ============== INIT ==============
+setTab('po');
+</script>
+</body>
+</html>

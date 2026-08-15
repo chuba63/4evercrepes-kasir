@@ -887,17 +887,72 @@ function renderDraftItems() {
     return;
   }
   el.innerHTML = orderDraft.items.map((it, idx) => {
-    const options = state.menu.map(m =>
-      `<option value="${m.id}" ${it.menuId === m.id ? 'selected' : ''}>${escapeHtml(m.name)} — ${formatRp(m.price)}</option>`
-    ).join('');
+    const m = state.menu.find(mm => mm.id === it.menuId);
+    const display = m ? `${m.name} — ${formatRp(m.price)}` : '';
     return `
       <div class="flex gap-2 items-center bg-rose-50 rounded-lg p-2">
-        <select onchange="orderDraft.items[${idx}].menuId=this.value; updateDraftTotal()" class="flex-1 border rounded px-2 py-1 bg-white text-sm">${options}</select>
+        <div class="flex-1 relative">
+          <input id="menu-input-${idx}" autocomplete="off" value="${escapeHtml(display)}" placeholder="Ketik nama menu..."
+            onfocus="onMenuFocus(${idx})" oninput="onMenuSearch(${idx}, this.value)" onblur="hideMenuSuggestions(${idx})"
+            class="w-full border rounded px-2 py-1 bg-white text-sm">
+          <div id="menu-suggestions-${idx}" class="hidden absolute top-full left-0 right-0 bg-white border rounded-lg shadow-lg z-30 mt-1 max-h-56 overflow-y-auto"></div>
+        </div>
         <input type="number" inputmode="numeric" min="1" value="${it.qty}" oninput="orderDraft.items[${idx}].qty=Math.max(1, parseInt(this.value)||1); updateDraftTotal()" class="w-14 border rounded px-2 py-1 text-center bg-white">
         <button onclick="removeDraftItem(${idx})" class="text-red-500 px-2 text-lg" title="Hapus item">✕</button>
       </div>
     `;
   }).join('');
+}
+
+// Daftar saran menu (dropdown yang bisa dicari). q kosong = tampilin semua menu.
+function renderMenuSuggestions(idx, q) {
+  const dropdown = document.getElementById(`menu-suggestions-${idx}`);
+  if (!dropdown) return;
+  const query = (q || '').toLowerCase().trim();
+  const matches = query ? state.menu.filter(m => m.name.toLowerCase().includes(query)) : state.menu;
+  if (matches.length === 0) {
+    dropdown.innerHTML = '<div class="px-3 py-2 text-xs text-gray-400 italic">Menu ga ketemu</div>';
+    dropdown.classList.remove('hidden');
+    return;
+  }
+  const selId = orderDraft.items[idx]?.menuId;
+  dropdown.innerHTML = matches.map(m => `
+    <button type="button" onmousedown="event.preventDefault()" onclick="pickMenu(${idx}, '${m.id}')" class="w-full text-left px-3 py-2 hover:bg-rose-50 border-b last:border-b-0 flex justify-between items-center gap-2">
+      <span class="text-sm ${m.id === selId ? 'font-semibold text-rose-500' : ''}">${escapeHtml(m.name)}</span>
+      <span class="text-xs text-gray-500 whitespace-nowrap">${formatRp(m.price)}</span>
+    </button>
+  `).join('');
+  dropdown.classList.remove('hidden');
+}
+
+// Pas kotak menu diklik: select semua teks (biar langsung ketimpa kalo ngetik) + tampilin semua menu
+function onMenuFocus(idx) {
+  document.getElementById(`menu-input-${idx}`)?.select();
+  renderMenuSuggestions(idx, '');
+}
+
+// Pas ngetik: filter menu sesuai ketikan
+function onMenuSearch(idx, val) { renderMenuSuggestions(idx, val); }
+
+// Pas milih menu dari daftar
+function pickMenu(idx, menuId) {
+  orderDraft.items[idx].menuId = menuId;
+  const m = state.menu.find(mm => mm.id === menuId);
+  const inp = document.getElementById(`menu-input-${idx}`);
+  if (inp && m) inp.value = `${m.name} — ${formatRp(m.price)}`;
+  document.getElementById(`menu-suggestions-${idx}`)?.classList.add('hidden');
+  updateDraftTotal();
+}
+
+// Pas kotak menu ditinggal (blur): tutup daftar + balikin teks ke menu yang beneran kepilih
+// (kalo user ngetik ngasal tapi ga milih apa-apa, teksnya ga nyangkut salah)
+function hideMenuSuggestions(idx) {
+  setTimeout(() => {
+    document.getElementById(`menu-suggestions-${idx}`)?.classList.add('hidden');
+    const inp = document.getElementById(`menu-input-${idx}`);
+    const m = state.menu.find(mm => mm.id === orderDraft.items[idx]?.menuId);
+    if (inp && m) inp.value = `${m.name} — ${formatRp(m.price)}`;
+  }, 200);
 }
 
 function addDraftItem() {
@@ -1948,6 +2003,7 @@ Object.assign(window, {
   // Order
   newOrder, editOrder, saveOrder, deleteOrder, togglePaid,
   addDraftItem, removeDraftItem, updateDraftTotal,
+  onMenuFocus, onMenuSearch, pickMenu, hideMenuSuggestions,
   // Customer
   newCustomer, editCustomer, saveCustomer, deleteCustomer, viewCustomer,
   showCustomerPicker, pickCustomer, filterPickerList, reopenOrderModal,

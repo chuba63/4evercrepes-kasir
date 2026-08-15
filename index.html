@@ -29,6 +29,7 @@
 <nav class="bg-white border-b border-gray-200 sticky top-[60px] z-10">
   <div class="flex max-w-md mx-auto overflow-x-auto">
     <button data-tab="po" class="tab-btn flex-shrink-0 px-3 py-3 text-sm font-medium">📋 PO</button>
+    <button data-tab="inbox" class="tab-btn flex-shrink-0 px-3 py-3 text-sm font-medium">📥 Masuk<span id="inbox-badge" class="hidden ml-1 bg-red-500 text-white text-xs font-bold rounded-full px-1.5 py-0.5"></span></button>
     <button data-tab="menu" class="tab-btn flex-shrink-0 px-3 py-3 text-sm font-medium">🍴 Menu</button>
     <button data-tab="customer" class="tab-btn flex-shrink-0 px-3 py-3 text-sm font-medium">👥 Customer</button>
     <button data-tab="history" class="tab-btn flex-shrink-0 px-3 py-3 text-sm font-medium">📁 Riwayat</button>
@@ -167,6 +168,13 @@ let pendingIGMessage = '';
 let selectedPoId = null;
 // Inline handler di HTML jalan di window scope (bukan module scope), jadi orderDraft harus di-mirror ke window
 window.orderDraft = null;
+
+// Kotak Masuk: pesanan mentah dari Google Docs (dikirim robot Apps Script).
+// PENTING: disimpen di node Firebase 'inbox' yang TERPISAH dari 'shop'.
+// Alasannya saveState() nulis pake set() ke seluruh 'shop' — kalo inbox ditaro di dalem shop,
+// tiap kali app nyimpen, kiriman robot bakal ketimpa & ilang.
+let inbox = [];
+let pendingInboxId = null; // inbox entry yang lagi diproses jadi order
 
 function loadState() {
   // Cache lokal — biar kalo offline pas reload, data masih ada
@@ -318,7 +326,9 @@ document.querySelectorAll('.tab-btn').forEach(b => {
 function render() {
   document.getElementById('business-name').textContent = state.business.name;
   const c = document.getElementById('content');
+  updateInboxBadge();
   if (activeTab === 'po') c.innerHTML = renderPoTab();
+  else if (activeTab === 'inbox') c.innerHTML = renderInboxTab();
   else if (activeTab === 'menu') c.innerHTML = renderMenuTab();
   else if (activeTab === 'customer') c.innerHTML = renderCustomerTab();
   else if (activeTab === 'keuangan') c.innerHTML = renderKeuanganTab();
@@ -603,6 +613,8 @@ function showModal(html) {
 function closeModal() {
   document.getElementById('modal').classList.add('hidden');
   document.getElementById('modal-content').innerHTML = '';
+  // Batal simpan = entry Kotak Masuk jangan ikut kebuang
+  pendingInboxId = null;
 }
 document.getElementById('modal').addEventListener('click', (e) => {
   if (e.target.id === 'modal') closeModal();
@@ -994,6 +1006,8 @@ function saveOrder() {
     po.orders.push(orderDraft);
   }
   autoSaveCustomer(orderDraft);
+  // Kalau order ini asalnya dari Kotak Masuk, entry-nya dibuang setelah beneran kesimpen
+  if (pendingInboxId) { removeInboxEntry(pendingInboxId); pendingInboxId = null; }
   saveState(); closeModal(); render();
 }
 
@@ -1983,12 +1997,279 @@ onAuthStateChanged(auth, async (user) => {
     hideAllScreens();
     render();
   });
+
+  // Subscribe ke /inbox — kiriman robot dari Google Docs.
+  // Node terpisah dari /shop supaya ga ketimpa saveState().
+  onValue(ref(db, 'inbox'), (snap) => {
+    const data = snap.val() || {};
+    inbox = Object.keys(data)
+      .map(k => ({ id: k, ...data[k] }))
+      .filter(x => (x.text || '').trim())
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    updateInboxBadge();
+    render();
+  }, (err) => {
+    // Biasanya kejadian kalo security rules buat /inbox belom ditambahin
+    console.error('Inbox subscription error:', err);
+  });
 });
 
 // Online/offline indicator (Firebase RTDB built-in)
 onValue(ref(db, '.info/connected'), (snap) => {
   updateConnIndicator(snap.val() === true);
 });
+
+// ============== KOTAK MASUK (dari Google Docs) ==============
+// Mesin pembaca: 1 baris teks -> nama customer + daftar item.
+// Contoh: "Sarah Gimbap cake 28D 2, Mini Bites 1"
+// Prinsip: lebih baik nanya (kasih ⚠️) daripada nebak diem-diem.
+
+function inboxNorm(s) { return (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+function inboxDigits(s) { return ((s || '').match(/\d+/g) || []).join(','); }
+
+// Jarak Levenshtein — ngitung berapa huruf beda antara 2 kata
+function inboxLev(a, b) {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+function inboxMaxDist(len) { return len <= 5 ? 0 : len <= 10 ? 1 : 2; }
+
+// Cocokin nama menu sebagai EKOR dari teks. Sisa di depan = calon nama customer.
+function inboxMatchMenu(text, menu) {
+  const nText = inboxNorm(text);
+  if (!nText) return null;
+  const words = nText.split(' ');
+  const cands = [];
+  for (const m of menu) {
+    const nm = inboxNorm(m.name);
+    if (!nm) continue;
+    const mWords = nm.split(' ').length;
+    if (mWords > words.length) continue;
+    const tail = words.slice(words.length - mWords).join(' ');
+    // ATURAN KERAS: angka di nama menu harus persis. "28D" ga boleh dikira "20d".
+    if (inboxDigits(tail) !== inboxDigits(nm)) continue;
+    const d = inboxLev(tail, nm);
+    if (d > inboxMaxDist(nm.length)) continue;
+    cands.push({ menu: m, dist: d, len: nm.length, leftoverCount: words.length - mWords, leftoverNorm: words.slice(0, words.length - mWords).join(' ') });
+  }
+  if (!cands.length) return null;
+  // Paling mirip menang; kalo seri, nama terpanjang menang ("Peach gum paket" > "Peach gum")
+  cands.sort((a, b) => a.dist - b.dist || b.len - a.len);
+  const top = cands[0], second = cands[1];
+  if (second && second.dist === top.dist && second.len === top.len) {
+    return { ...top, ambiguous: [top.menu.name, second.menu.name] };
+  }
+  return top;
+}
+
+// Ambil sisa teks di depan menu dari tulisan ASLI (biar "Sarah" ga jadi "sarah")
+function inboxLeftover(origText, hit) {
+  const origWords = (origText || '').trim().split(/\s+/).filter(Boolean);
+  const normWords = inboxNorm(origText).split(' ').filter(Boolean);
+  if (origWords.length === normWords.length) return origWords.slice(0, hit.leftoverCount).join(' ');
+  return hit.leftoverNorm;
+}
+
+function inboxParseSegment(seg, menu) {
+  const raw = (seg || '').trim();
+  if (!raw) return null;
+  // Penanda jelas " x2" -> pasti jumlah. Wajib ada spasi sebelum x, biar huruf x
+  // di tengah kata (mis. "box") ga kebaca sebagai penanda.
+  const explicit = raw.match(/^(.*?)\s+[xX*]\s*(\d+)\s*$/);
+  if (explicit) {
+    const hit = inboxMatchMenu(explicit[1], menu);
+    return hit
+      ? { menu: hit.menu, qty: parseInt(explicit[2]), leftover: inboxLeftover(explicit[1], hit), dist: hit.dist, ambiguous: hit.ambiguous }
+      : { menu: null, qty: parseInt(explicit[2]), rawText: explicit[1].trim(), leftover: '' };
+  }
+  const opts = [];
+  // Tafsiran A: angka polos di belakang = jumlah
+  const bare = raw.match(/^(.*?)[\s]+(\d+)\s*$/);
+  if (bare) {
+    const hit = inboxMatchMenu(bare[1], menu);
+    if (hit) opts.push({ menu: hit.menu, qty: parseInt(bare[2]), leftover: inboxLeftover(bare[1], hit), dist: hit.dist, ambiguous: hit.ambiguous });
+  }
+  // Tafsiran B: angka belakang bagian dari nama menu, jumlah = 1
+  const whole = inboxMatchMenu(raw, menu);
+  if (whole) opts.push({ menu: whole.menu, qty: 1, leftover: inboxLeftover(raw, whole), dist: whole.dist, ambiguous: whole.ambiguous });
+
+  if (!opts.length) {
+    const fallback = bare ? bare[1].trim() : raw;
+    return { menu: null, qty: bare ? parseInt(bare[2]) : 1, rawText: fallback, leftover: '' };
+  }
+  opts.sort((a, b) => a.dist - b.dist);
+  if (opts.length > 1 && opts[0].dist === opts[1].dist && opts[0].menu.id !== opts[1].menu.id) {
+    return { ...opts[0], ambiguous: [opts[0].menu.name, opts[1].menu.name] };
+  }
+  return opts[0];
+}
+
+function parseInboxLine(line, menu) {
+  const clean = (line || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  const items = [], problems = [];
+  let customerName = '';
+  clean.split(',').forEach((seg, i) => {
+    const r = inboxParseSegment(seg, menu);
+    if (!r) return;
+    if (i === 0) customerName = (r.leftover || '').trim();
+    if (r.menu) {
+      items.push({ menuId: r.menu.id, menuName: r.menu.name, qty: r.qty });
+      if (r.ambiguous) problems.push({ type: 'ambigu', text: seg.trim(), pilihan: r.ambiguous });
+      else if (r.dist > 0) problems.push({ type: 'mirip', text: seg.trim(), jadi: r.menu.name });
+    } else {
+      if (i === 0) {
+        const w = (r.rawText || '').split(' ');
+        if (w.length > 1) customerName = w[0];
+      }
+      problems.push({ type: 'ga-ketemu', text: r.rawText || seg.trim() });
+    }
+  });
+  return { rawLine: clean, customerName, items, problems };
+}
+
+// ---------- tampilan ----------
+function updateInboxBadge() {
+  const el = document.getElementById('inbox-badge');
+  if (!el) return;
+  if (inbox.length > 0) {
+    el.textContent = inbox.length;
+    el.classList.remove('hidden');
+  } else {
+    el.classList.add('hidden');
+  }
+}
+
+function renderInboxTab() {
+  if (inbox.length === 0) {
+    return `
+      <div class="text-center py-12 px-4">
+        <div class="text-4xl mb-3">📥</div>
+        <p class="text-gray-500 font-medium">Belum ada pesanan masuk</p>
+        <p class="text-xs text-gray-400 mt-2">Pesanan yang lu tulis di Google Docs bakal nongol di sini otomatis.</p>
+      </div>`;
+  }
+  const activePos = getActivePos();
+  if (activePos.length === 0) {
+    return `
+      <div class="p-4">
+        <div class="bg-amber-50 border border-amber-300 rounded-lg p-3 text-sm text-amber-800">
+          ⚠️ Ada <b>${inbox.length}</b> pesanan masuk, tapi belom ada PO aktif.
+          Bikin PO dulu di tab 📋 PO, baru pesanannya bisa diterima.
+        </div>
+      </div>`;
+  }
+
+  const cards = inbox.map(entry => {
+    const p = parseInboxLine(entry.text, state.menu);
+    const hasProblem = !p || p.problems.length > 0;
+    const itemRows = (p?.items || []).map(it => {
+      const m = state.menu.find(mm => mm.id === it.menuId);
+      const price = m ? m.price * it.qty : 0;
+      return `<div class="flex justify-between text-sm py-0.5">
+        <span class="text-green-700">✓ ${escapeHtml(it.menuName)} × ${it.qty}</span>
+        <span class="text-gray-600 whitespace-nowrap">${formatRp(price)}</span>
+      </div>`;
+    }).join('');
+
+    const problemRows = (p?.problems || []).map(pr => {
+      if (pr.type === 'ga-ketemu') return `<div class="bg-amber-100 border border-dashed border-amber-400 rounded p-2 text-xs text-amber-900 mt-1">⚠️ <b>"${escapeHtml(pr.text)}"</b> ga ketemu di menu. Terima dulu, terus betulin di form.</div>`;
+      if (pr.type === 'ambigu') return `<div class="bg-amber-100 border border-dashed border-amber-400 rounded p-2 text-xs text-amber-900 mt-1">⚠️ <b>"${escapeHtml(pr.text)}"</b> bisa berarti <b>${escapeHtml(pr.pilihan.join('</b> atau <b>'))}</b>. Cek pas di form ya.</div>`;
+      return `<div class="bg-amber-50 border border-dashed border-amber-300 rounded p-2 text-xs text-amber-800 mt-1">⚠️ Ditebak jadi <b>${escapeHtml(pr.jadi)}</b> (tulisannya rada beda). Cek bener ga.</div>`;
+    }).join('');
+
+    const subtotal = (p?.items || []).reduce((sum, it) => {
+      const m = state.menu.find(mm => mm.id === it.menuId);
+      return sum + (m ? m.price * it.qty : 0);
+    }, 0);
+
+    const poOptions = activePos.map(po => `<option value="${po.id}">${escapeHtml(po.name)}</option>`).join('');
+    const canAccept = p && p.items.length > 0;
+
+    return `
+      <div class="bg-white rounded-xl p-3 mb-3 border ${hasProblem ? 'border-amber-300 bg-amber-50' : ''}">
+        <div class="font-bold">${p?.customerName ? escapeHtml(p.customerName) : '<span class="text-gray-400 italic">(nama ga kebaca)</span>'}</div>
+        <div class="text-xs text-gray-400 mb-2 italic">"${escapeHtml(entry.text)}"</div>
+        ${itemRows}
+        ${problemRows}
+        ${canAccept ? `<div class="flex justify-between text-sm font-bold text-rose-500 border-t border-dashed mt-2 pt-2">
+          <span>Subtotal</span><span>${formatRp(subtotal)}</span>
+        </div>` : ''}
+        <div class="mt-3">
+          <label class="block text-xs text-gray-500 mb-1">Masukin ke PO</label>
+          <select id="inbox-po-${entry.id}" class="w-full border rounded-lg px-2 py-1.5 text-sm bg-white">${poOptions}</select>
+        </div>
+        <div class="flex gap-2 mt-3">
+          <button onclick="terimaInbox('${entry.id}')" class="flex-1 bg-rose-500 text-white rounded-lg py-2 text-sm font-bold">✓ Terima</button>
+          <button onclick="buangInbox('${entry.id}')" class="px-4 bg-gray-100 text-gray-600 rounded-lg py-2 text-sm font-bold">Buang</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  return `<div class="p-3">
+    <p class="text-xs text-gray-500 mb-3">${inbox.length} pesanan nunggu dicek. Pilih PO-nya, terus Terima.</p>
+    ${cards}
+  </div>`;
+}
+
+// Terima: buka form pesanan yang BIASA, tapi udah keisi nama + menunya.
+// Sengaja pake form lama biar semua yang udah jalan bener (autocomplete, auto-save customer,
+// itungan total) tetep kepake — makin dikit kode baru, makin dikit peluang bug.
+function terimaInbox(id) {
+  const entry = inbox.find(x => x.id === id);
+  if (!entry) return;
+  const sel = document.getElementById(`inbox-po-${id}`);
+  const poId = sel ? sel.value : null;
+  if (!poId) { alert('Pilih PO dulu'); return; }
+  if (state.menu.length === 0) { alert('Tambah menu dulu di tab Menu ya!'); return; }
+
+  const p = parseInboxLine(entry.text, state.menu);
+  const items = (p?.items || []).map(it => ({ menuId: it.menuId, qty: it.qty }));
+  if (items.length === 0) items.push({ menuId: state.menu[0].id, qty: 1 });
+
+  selectedPoId = poId;
+  pendingInboxId = id;
+  editingOrderId = null;
+  window.orderDraft = orderDraft = {
+    id: uid(),
+    customerName: p?.customerName || '',
+    customerWA: '',
+    customerIG: '',
+    items,
+    shipping: 0,
+    discount: 0,
+    paid: false,
+    notes: ''
+  };
+  showOrderModal();
+}
+
+function buangInbox(id) {
+  const entry = inbox.find(x => x.id === id);
+  if (!entry) return;
+  if (!confirm(`Buang pesanan ini?\n\n"${entry.text}"\n\nCatetan di Google Docs ga ikut kehapus.`)) return;
+  removeInboxEntry(id);
+}
+
+function removeInboxEntry(id) {
+  // Hapus lokal dulu biar tampilan langsung responsif
+  inbox = inbox.filter(x => x.id !== id);
+  updateInboxBadge();
+  render();
+  if (isAuthorized && currentUser) {
+    set(ref(db, `inbox/${id}`), null).catch(err => console.error('Gagal hapus inbox:', err));
+  }
+}
 
 // ============== EXPOSE FUNCTIONS TO WINDOW ==============
 // Module scope tidak punya akses langsung ke onclick="...". Expose ke window:
@@ -2009,6 +2290,8 @@ Object.assign(window, {
   showCustomerPicker, pickCustomer, filterPickerList, reopenOrderModal,
   pickAutocomplete, onOrderNameInput, onOrderWAInput, onOrderIGInput,
   hideNameSuggestions, hideWASuggestions, hideIGSuggestions, renderCustomerListOnly,
+  // Kotak Masuk
+  terimaInbox, buangInbox,
   // Keuangan
   newExpense, editExpense, saveExpense, deleteExpense, changeKeuanganView,
   // WA/IG

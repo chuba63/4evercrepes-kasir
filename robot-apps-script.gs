@@ -34,6 +34,35 @@ function ambilSetelan(nama) {
 }
 
 
+/**
+ * Ambil DOC_ID. Boleh diisi URL utuh, boleh ID doang — dua-duanya jalan.
+ * Contoh URL: https://docs.google.com/document/d/1AbC...XyZ/edit
+ */
+function ambilDocId() {
+  const isi = ambilSetelan('DOC_ID').trim();
+  const cocok = isi.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  return cocok ? cocok[1] : isi;
+}
+
+
+/** Buka doc-nya, dengan pesan error yang jelas kalo gagal */
+function bukaDoc() {
+  const id = ambilDocId();
+  try {
+    return DocumentApp.openById(id);
+  } catch (e) {
+    throw new Error(
+      'Doc ga kebuka. ID yang kepake: "' + id + '"\n\n' +
+      'Cek 3 hal ini:\n' +
+      '1. DOC_ID-nya bener? (boleh paste URL utuh doc-nya)\n' +
+      '2. Doc-nya Google DOCS, bukan Sheets/Slides?\n' +
+      '3. Doc-nya punya akun Google yang sama kayak yang lu pake sekarang?\n\n' +
+      'Pesan asli: ' + e.message
+    );
+  }
+}
+
+
 /** Login sebagai akun robot, balikin token buat izin nulis ke Firebase */
 function loginRobot() {
   const res = UrlFetchApp.fetch(
@@ -73,7 +102,7 @@ function ambilSemuaBaris(body) {
 
 /** ===== FUNGSI UTAMA — ini yang dijalanin tiap 5 menit ===== */
 function kirimPesanan() {
-  const doc = DocumentApp.openById(ambilSetelan('DOC_ID'));
+  const doc = bukaDoc();
   const semua = ambilSemuaBaris(doc.getBody());
 
   // Saring baris yang belom dikirim
@@ -146,7 +175,7 @@ function matikanJadwal() {
 
 /** ===== Tes koneksi — AMAN, ga ngirim & ga ngubah apa-apa ===== */
 function cekKoneksi() {
-  const doc = DocumentApp.openById(ambilSetelan('DOC_ID'));
+  const doc = bukaDoc();
   Logger.log('📄 Doc kebaca: "' + doc.getName() + '"');
 
   const baris = ambilSemuaBaris(doc.getBody()).filter(function (p) {

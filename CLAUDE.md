@@ -50,10 +50,9 @@ Firebase CLI di Windows dipanggil `firebase.cmd`, dijalankan dari folder ini.
 
 > Perbarui bagian ini setiap kali ada yang selesai atau tertunda.
 
-- **2026-09-27 — BELUM DEPLOY:** `firebase.json` sudah diperbaiki agar folder `.git` tidak
-  terpublikasi, tapi belum di-deploy. Urutan wajib: deploy hosting → pastikan
-  `https://evercrepes-kasir.web.app/.git/config` mengembalikan 404 → baru `git push`.
-  Alasannya: repo GitHub masih Public dan dokumentasi menjelaskan celah ini.
-- **Menunggu keputusan pemilik:** model jual (D-22: per klien vs multi-tenant), nama produk,
-  target (PO makanan saja atau umum → "Menu" vs "Produk"), repo dijadikan private.
+- **2026-09-27 — Diputuskan:** versi jual dibuat TERPISAH sebagai "Celemek: Catat Pesanan PO"
+  (multi-tenant, target PO makanan, gratis dulu) di folder `C:\Users\kurni\celemek` dengan
+  Firebase & repo GitHub sendiri. Aplikasi di folder ini tetap untuk 4ever Crepes saja —
+  jangan tambahkan fitur Celemek ke sini.
+- **Menunggu keputusan pemilik:** repo 4ever Crepes dijadikan private.
 - **Belum dikonfirmasi:** apakah `pasangJadwal` di Apps Script sudah dijalankan (robot aktif).

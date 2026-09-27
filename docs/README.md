@@ -12,7 +12,7 @@
 | [6. Deployment & operasional](06-deployment-operasional.md) | Alur rilis, rollback, file yang dipublikasikan, robot Google Docs |
 | [7. Batasan yang diketahui](07-batasan.md) | L-01 s/d L-10: kelemahan yang sudah diketahui dan arah perbaikannya |
 | [8. Kesiapan untuk dijual ke UMKM](08-kesiapan-jual.md) | Pilihan model penjualan dan checklist sebelum dijual ke UMKM |
-| [9. Decision log](09-decision-log.md) | D-01 s/d D-22: setiap keputusan penting beserta alasannya |
+| [9. Decision log](09-decision-log.md) | D-01 s/d D-23: setiap keputusan penting beserta alasannya |
 | [10. Riwayat versi](10-riwayat-versi.md) | Daftar perubahan per commit |
 
 ## Mulai dari mana?

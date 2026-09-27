@@ -99,9 +99,22 @@ Format: **Konteks** → **Keputusan** → **Alasan** → **Alternatif yang ditol
 - **Konteks:** Pola `**/.*` hanya mengecualikan *file* berawalan titik. Isi folder `.git` (mis. `/.git/HEAD`, `/.git/config`) ternyata bisa diunduh publik dari URL production.
 - **Keputusan:** Tambahkan `**/.*/**`, `backups/**`, `**/*.md`, `**/*.gs` ke daftar pengecualian.
 - **Dampak saat ditemukan:** Rendah — isinya sama dengan repo GitHub yang publik dan tidak mengandung password. Tetapi bila repo dijadikan private, kebocoran ini akan membatalkannya.
+- **Status:** Di-deploy 27 September 2026 (`found 1 files`); `/.git/config`, `/.git/HEAD`, `CLAUDE.md`, `docs/`, `*.gs`, `firebase.json` terverifikasi 404, dan `index.html` live identik dengan sebelum deploy. Dokumentasi baru di-push ke GitHub setelah verifikasi ini.
 
-## D-22 · (Terbuka) Model penjualan: per klien atau multi-tenant
-- **Status:** Belum diputuskan. Lihat [bagian 8](08-kesiapan-jual.md).
+## D-22 · Model penjualan: multi-tenant (Opsi B)
+- **Tanggal:** 27 September 2026
+- **Konteks:** Pemilik ingin aplikasi masuk Play Store / App Store untuk dijual ke UMKM, bukan sekadar dipakai sendiri. Aplikasi di store adalah satu aplikasi yang diunduh semua orang.
+- **Keputusan:** Opsi B — multi-tenant: satu sistem, data tiap toko dipisah di `/shops/{shopId}`, pendaftaran toko mandiri.
+- **Alasan:** Opsi A (satu project Firebase per klien) tidak cocok dengan satu aplikasi store yang dipasang sendiri oleh pengguna.
+- **Ditolak:** Opsi A; PWA saja tanpa store (cukup untuk pemakaian sendiri, tidak untuk dijual).
+
+## D-23 · Versi jual dibangun terpisah sebagai "Celemek"
+- **Tanggal:** 27 September 2026
+- **Konteks:** Aplikasi 4ever Crepes dipakai setiap hari; perubahan multi-tenant adalah perombakan terbesar proyek ini.
+- **Keputusan:** Produk baru **"Celemek: Catat Pesanan PO"** dibuat dari salinan `index.html` di folder `C:\Users\kurni\celemek`, dengan git baru, repo GitHub private sendiri, dan project Firebase sendiri. Aplikasi di repo ini tetap khusus 4ever Crepes.
+- **Alasan:** Bug atau data uji Celemek tidak mungkin menyentuh data 4ever Crepes — ingat preview dan production di satu project memakai database yang sama.
+- **Ditolak:** Branch git di repo ini (mudah salah deploy branch ke production); project Firebase yang sama (database ikut tercampur).
+- **Konsekuensi:** Perbaikan bug di satu aplikasi harus disalin manual ke aplikasi lainnya.
 
 ---
 

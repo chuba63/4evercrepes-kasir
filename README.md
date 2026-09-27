@@ -43,4 +43,5 @@ robot-apps-script.gs    robot Google Docs → Kotak Masuk (dipasang di Apps Scri
 firebase.json           setelan Firebase Hosting
 .firebaserc             project Firebase default
 docs/                   dokumentasi per bab
+CLAUDE.md               konteks kerja untuk AI (Claude) yang membantu mengembangkan app
 ```

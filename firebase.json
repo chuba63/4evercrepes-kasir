@@ -3,9 +3,12 @@
     "public": ".",
     "ignore": [
       "firebase.json",
-      ".firebaserc",
       "**/.*",
-      "**/node_modules/**"
+      "**/.*/**",
+      "**/node_modules/**",
+      "backups/**",
+      "**/*.md",
+      "**/*.gs"
     ],
     "headers": [
       {
